@@ -29,58 +29,97 @@ jobs:
         id: find_zip
         shell: bash
         run: |
+          set -e
           ZIP=$(find . -maxdepth 2 -type f -iname 'Pani_Puri_Business_V13*.zip' | head -n 1)
+
           if [ -z "$ZIP" ]; then
-            echo "V13 ZIP not found."
+            echo "ERROR: V13 ZIP not found."
             find . -maxdepth 2 -type f | sort
             exit 1
           fi
-          echo "Found: $ZIP"
+
+          echo "Using ZIP: $ZIP"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
 
       - name: Extract V13 project
+        id: extract
         shell: bash
         run: |
+          set -e
+
           rm -rf android-project
           mkdir -p android-project
+
           unzip -q "${{ steps.find_zip.outputs.zip }}" -d android-project
 
-          # If ZIP contains one top-level V13 folder, flatten it.
-          if [ -d "android-project/Pani_Puri_Business_V13" ]; then
-            shopt -s dotglob
-            mv android-project/Pani_Puri_Business_V13/* android-project/ || true
-            rmdir android-project/Pani_Puri_Business_V13 || true
-          fi
+          PROJECT_DIR=$(find android-project -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print -quit | xargs -r dirname)
 
-          echo "Extracted project:"
-          find android-project -maxdepth 2 -type f | sort | head -100
-
-      - name: Verify Android project
-        shell: bash
-        run: |
-          test -f android-project/settings.gradle || test -f android-project/settings.gradle.kts
-          test -f android-project/app/build.gradle || test -f android-project/app/build.gradle.kts
-
-      - name: Build Debug APK
-        working-directory: android-project
-        shell: bash
-        run: |
-          gradle --no-daemon --stacktrace assembleDebug
-
-      - name: Find APK
-        id: apk
-        shell: bash
-        run: |
-          APK=$(find app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)
-          if [ -z "$APK" ]; then
-            echo "APK not found."
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: settings.gradle not found inside ZIP."
+            find android-project -maxdepth 5 -type f | sort
             exit 1
           fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+
+      - name: Enable AndroidX
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          touch gradle.properties
+
+          grep -qxF 'android.useAndroidX=true' gradle.properties \
+            || echo 'android.useAndroidX=true' >> gradle.properties
+
+          grep -qxF 'android.enableJetifier=true' gradle.properties \
+            || echo 'android.enableJetifier=true' >> gradle.properties
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Locate APK
+        id: locate_apk
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for generated APK..."
+
+          find "${{ env.PROJECT_DIR }}" \
+            -type f -name '*.apk' -print
+
+          APK=$(find "${{ env.PROJECT_DIR }}" \
+            -type f -name '*.apk' | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: Gradle succeeded but no APK file was found."
+
+            echo "Build output directories:"
+            find "${{ env.PROJECT_DIR }}" \
+              -type d -path '*/build/outputs/*' -print
+
+            exit 1
+          fi
+
+          echo "Found APK: $APK"
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Pani-Puri-Business-V13-APK
-          path: ${{ steps.apk.outputs.apk }}
+          path: ${{ steps.locate_apk.outputs.apk }}
           if-no-files-found: error
